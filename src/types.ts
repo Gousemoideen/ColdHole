@@ -9,6 +9,8 @@ export interface UploadedFile {
   downloadsCount?: number;
   blobData?: Blob; // For local indexedDB fallback
   content?: string; // Optional text content snippet if applicable
+  isCloudSynced?: boolean;
+  cloudUrl?: string;
 }
 
 export type ExpirationOption = "never" | "24h" | "7d" | "30d";

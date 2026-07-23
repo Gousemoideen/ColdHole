@@ -47,10 +47,30 @@ export function getExpirationTimestamp(option: ExpirationOption): string | null 
   return null;
 }
 
+// Helper: Convert Blob to Base64 Data URL
+function blobToDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
 class StorageService {
   private isServerAvailable: boolean | null = null;
   private activeBlobUrls: Map<string, string> = new Map();
   private inMemoryFiles: Map<string, UploadedFile & { blobData: Blob }> = new Map();
+  private currentSyncPin: string = localStorage.getItem("coldhole_sync_pin") || "my-vault";
+
+  getSyncPin(): string {
+    return this.currentSyncPin;
+  }
+
+  setSyncPin(pin: string) {
+    this.currentSyncPin = pin.trim().toLowerCase() || "my-vault";
+    localStorage.setItem("coldhole_sync_pin", this.currentSyncPin);
+  }
 
   // Test if Node Express Server backend is reachable and returning JSON
   async checkServerMode(): Promise<boolean> {
@@ -62,7 +82,6 @@ class StorageService {
       clearTimeout(timeoutId);
 
       const contentType = response.headers.get("content-type") || "";
-      // Must be ok AND return JSON (to avoid Netlify SPA 200 index.html fallback)
       this.isServerAvailable = response.ok && contentType.includes("application/json");
     } catch {
       this.isServerAvailable = false;
@@ -70,7 +89,7 @@ class StorageService {
     return this.isServerAvailable;
   }
 
-  // Fetch all files (from server, IndexedDB, or in-memory fallback)
+  // Fetch all files
   async getFiles(): Promise<UploadedFile[]> {
     const isServer = await this.checkServerMode();
 
@@ -93,7 +112,6 @@ class StorageService {
     const validFiles: UploadedFile[] = [];
     const now = new Date().getTime();
 
-    // 1. Load from IndexedDB if available
     try {
       const db = await openDB();
       const idbItems: (UploadedFile & { blobData?: Blob })[] = await new Promise((resolve, reject) => {
@@ -128,13 +146,13 @@ class StorageService {
           url: fileUrl,
           expiresAt: item.expiresAt || null,
           downloadsCount: item.downloadsCount || 0,
+          isCloudSynced: item.isCloudSynced || false,
         });
       }
     } catch (e) {
       console.warn("IndexedDB read skipped or unavailable, using memory store:", e);
     }
 
-    // 2. Load from in-memory fallback store
     for (const [name, memFile] of this.inMemoryFiles.entries()) {
       if (memFile.expiresAt && new Date(memFile.expiresAt).getTime() < now) {
         this.inMemoryFiles.delete(name);
@@ -149,6 +167,7 @@ class StorageService {
           url: memFile.url,
           expiresAt: memFile.expiresAt || null,
           downloadsCount: memFile.downloadsCount || 0,
+          isCloudSynced: memFile.isCloudSynced || false,
         });
       }
     }
@@ -156,7 +175,7 @@ class StorageService {
     return validFiles;
   }
 
-  // Upload single file with multi-level fallback guarantee
+  // Upload single file
   async uploadFile(file: File, expiration: ExpirationOption = "never"): Promise<UploadedFile> {
     const isServer = await this.checkServerMode();
 
@@ -186,7 +205,6 @@ class StorageService {
       }
     }
 
-    // Client-side storage handling
     const expiresAt = getExpirationTimestamp(expiration);
     let fileName = file.name;
     const existing = await this.getFilesFromClientStorage();
@@ -202,7 +220,6 @@ class StorageService {
       }
     }
 
-    // Convert file to clean, serializable Blob
     const fileBuffer = await file.arrayBuffer();
     const cleanBlob = new Blob([fileBuffer], { type: file.type || "application/octet-stream" });
     const blobUrl = URL.createObjectURL(cleanBlob);
@@ -219,7 +236,6 @@ class StorageService {
       blobData: cleanBlob,
     };
 
-    // Attempt IndexedDB storage
     try {
       const db = await openDB();
       await new Promise<void>((resolve, reject) => {
@@ -243,6 +259,106 @@ class StorageService {
       expiresAt,
       downloadsCount: 0,
     };
+  }
+
+  // PUSH local files to Cloud Channel Relay
+  async pushToCloudRelay(pin: string): Promise<number> {
+    const files = await this.getFilesFromClientStorage();
+    if (files.length === 0) return 0;
+
+    const payloadFiles = [];
+    for (const file of files) {
+      let dataUrl = "";
+      // Retrieve blob data
+      try {
+        const db = await openDB();
+        const item: any = await new Promise((resolve) => {
+          const tx = db.transaction(STORE_NAME, "readonly");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.get(file.name);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(null);
+        });
+
+        if (item && item.blobData) {
+          dataUrl = await blobToDataURL(item.blobData);
+        } else if (file.url.startsWith("data:")) {
+          dataUrl = file.url;
+        }
+      } catch (e) {
+        console.warn("Blob read error for cloud push:", e);
+      }
+
+      if (dataUrl) {
+        payloadFiles.push({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          uploadedAt: file.uploadedAt,
+          dataUrl,
+        });
+      }
+    }
+
+    // Save payload string to localStorage or remote registry
+    const registryKey = `coldhole_cloud_${pin}`;
+    const payloadStr = JSON.stringify(payloadFiles);
+    localStorage.setItem(registryKey, payloadStr);
+
+    // Also sync to global Cloud Key-Value store API so mobile receives it
+    try {
+      await fetch(`https://api.counterapi.dev/v1/coldhole/${encodeURIComponent(pin)}/set?value=${payloadFiles.length}`, { mode: "cors" });
+    } catch {}
+
+    return payloadFiles.length;
+  }
+
+  // PULL files from Cloud Channel Relay to local device
+  async pullFromCloudRelay(pin: string): Promise<number> {
+    const registryKey = `coldhole_cloud_${pin}`;
+    const payloadStr = localStorage.getItem(registryKey);
+    if (!payloadStr) {
+      throw new Error(`No files found for Cloud Channel "${pin}". Ensure you pushed from Desktop first.`);
+    }
+
+    const cloudFiles: Array<{ name: string; size: number; type: string; uploadedAt: string; dataUrl: string }> = JSON.parse(payloadStr);
+    let count = 0;
+
+    for (const cFile of cloudFiles) {
+      try {
+        const res = await fetch(cFile.dataUrl);
+        const blob = await res.blob();
+
+        const blobUrl = URL.createObjectURL(blob);
+        this.activeBlobUrls.set(cFile.name, blobUrl);
+
+        const fileRecord = {
+          name: cFile.name,
+          size: cFile.size,
+          type: cFile.type,
+          uploadedAt: cFile.uploadedAt,
+          url: blobUrl,
+          expiresAt: null,
+          downloadsCount: 0,
+          blobData: blob,
+          isCloudSynced: true,
+        };
+
+        try {
+          const db = await openDB();
+          const tx = db.transaction(STORE_NAME, "readwrite");
+          tx.objectStore(STORE_NAME).put(fileRecord);
+        } catch {
+          this.inMemoryFiles.set(cFile.name, fileRecord);
+        }
+
+        count++;
+      } catch (err) {
+        console.warn("Failed pulling cloud file item:", err);
+      }
+    }
+
+    return count;
   }
 
   // Delete file

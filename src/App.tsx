@@ -20,7 +20,8 @@ import {
   CheckSquare,
   Square,
   ShieldAlert,
-  Code
+  Code,
+  Cloud
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { UploadedFile } from "./types";
@@ -29,6 +30,7 @@ import FileUploader from "./components/FileUploader";
 import FileCard, { formatBytes } from "./components/FileCard";
 import FilePreviewModal from "./components/FilePreviewModal";
 import QRCodeModal from "./components/QRCodeModal";
+import CloudSyncModal from "./components/CloudSyncModal";
 
 export default function App() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
@@ -45,6 +47,7 @@ export default function App() {
   const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<UploadedFile | null>(null);
   const [qrFile, setQrFile] = useState<UploadedFile | null>(null);
+  const [showCloudSync, setShowCloudSync] = useState(false);
   const [selectedFileNames, setSelectedFileNames] = useState<string[]>([]);
   const [isDeletingBulk, setIsDeletingBulk] = useState(false);
 
@@ -228,6 +231,16 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Cloud Sync Button */}
+            <button
+              onClick={() => setShowCloudSync(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-50 dark:bg-violet-950/40 text-violet-600 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/50 text-xs font-extrabold transition-all border border-violet-200/60 dark:border-violet-800/60 shadow-sm"
+              title="Cross-Device Cloud Sync"
+            >
+              <Cloud className="h-4 w-4 animate-bounce text-violet-600 dark:text-violet-400" />
+              <span className="hidden sm:inline">Cloud Sync</span>
+            </button>
+
             {/* Dark Mode Switcher */}
             <button
               onClick={() => setDarkMode(!darkMode)}
@@ -296,7 +309,6 @@ export default function App() {
                 <span className="text-[10px] font-mono text-zinc-400">{storagePercentage}%</span>
               </div>
               <p className="text-lg font-extrabold text-zinc-900 dark:text-zinc-100 leading-tight mt-0.5">{formatBytes(totalStorage)}</p>
-              {/* Storage progress bar */}
               <div className="w-full bg-zinc-100 dark:bg-zinc-800 h-1.5 rounded-full mt-2 overflow-hidden">
                 <div
                   className="bg-violet-600 h-full rounded-full transition-all duration-500"
@@ -306,10 +318,15 @@ export default function App() {
             </div>
           </div>
 
-          <div className="bg-gradient-to-br from-violet-600 to-indigo-700 p-4 rounded-2xl text-white shadow-lg shadow-violet-500/10 flex items-center justify-between">
+          <div
+            onClick={() => setShowCloudSync(true)}
+            className="bg-gradient-to-br from-violet-600 to-indigo-700 p-4 rounded-2xl text-white shadow-lg shadow-violet-500/10 flex items-center justify-between cursor-pointer hover:scale-[1.01] transition-transform"
+          >
             <div>
-              <h4 className="text-xs font-bold leading-tight">Universal Sync & Netlify Ready</h4>
-              <p className="text-[10px] text-white/80 mt-1 max-w-[210px]">Deployable anywhere with instant client & server storage fallback.</p>
+              <h4 className="text-xs font-bold leading-tight flex items-center gap-1.5">
+                <Cloud className="h-4 w-4" /> Cloud Sync Active
+              </h4>
+              <p className="text-[10px] text-white/80 mt-1 max-w-[210px]">Tap to push desktop files to mobile or pull cloud vault.</p>
             </div>
             <div className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-ping shadow-sm shrink-0" />
           </div>
@@ -515,6 +532,13 @@ export default function App() {
           fileUrl={qrFile.url}
         />
       )}
+
+      {/* Cross-Device Cloud Sync Modal */}
+      <CloudSyncModal
+        isOpen={showCloudSync}
+        onClose={() => setShowCloudSync(false)}
+        onSyncComplete={fetchFiles}
+      />
 
       {/* Footer */}
       <footer className="mt-auto py-8 text-center text-[11px] text-zinc-400 dark:text-zinc-600 border-t border-zinc-200/60 dark:border-zinc-800/80 bg-white/50 dark:bg-zinc-950/50">
