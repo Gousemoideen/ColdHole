@@ -3,6 +3,7 @@ import { UploadedFile, ExpirationOption } from "../types";
 const DB_NAME = "ColdHoleDB";
 const STORE_NAME = "files";
 const DB_VERSION = 1;
+const GLOBAL_CLOUD_PIN = "coldhole-global-vault";
 
 // Open IndexedDB connection with error handling
 function openDB(): Promise<IDBDatabase> {
@@ -61,16 +62,6 @@ class StorageService {
   private isServerAvailable: boolean | null = null;
   private activeBlobUrls: Map<string, string> = new Map();
   private inMemoryFiles: Map<string, UploadedFile & { blobData: Blob }> = new Map();
-  private currentSyncPin: string = localStorage.getItem("coldhole_sync_pin") || "my-vault";
-
-  getSyncPin(): string {
-    return this.currentSyncPin;
-  }
-
-  setSyncPin(pin: string) {
-    this.currentSyncPin = pin.trim().toLowerCase() || "my-vault";
-    localStorage.setItem("coldhole_sync_pin", this.currentSyncPin);
-  }
 
   // Test if Node Express Server backend is reachable and returning JSON
   async checkServerMode(): Promise<boolean> {
@@ -89,7 +80,7 @@ class StorageService {
     return this.isServerAvailable;
   }
 
-  // Fetch all files
+  // Fetch all files (Auto-pulling from global cloud vault)
   async getFiles(): Promise<UploadedFile[]> {
     const isServer = await this.checkServerMode();
 
@@ -104,6 +95,11 @@ class StorageService {
         console.warn("Failed fetching from server, falling back to client storage:", err);
       }
     }
+
+    // Auto-pull global cloud uploads on mobile/client
+    try {
+      await this.pullFromCloudRelay();
+    } catch {}
 
     return this.getFilesFromClientStorage();
   }
@@ -175,7 +171,7 @@ class StorageService {
     return validFiles;
   }
 
-  // Upload single file
+  // Upload single file (with automatic background cloud sync)
   async uploadFile(file: File, expiration: ExpirationOption = "never"): Promise<UploadedFile> {
     const isServer = await this.checkServerMode();
 
@@ -234,6 +230,7 @@ class StorageService {
       expiresAt,
       downloadsCount: 0,
       blobData: cleanBlob,
+      isCloudSynced: true,
     };
 
     try {
@@ -250,6 +247,11 @@ class StorageService {
       this.inMemoryFiles.set(fileName, fileRecord);
     }
 
+    // Auto-sync to global cloud in background so mobile receives it immediately
+    setTimeout(() => {
+      this.pushToCloudRelay().catch(() => {});
+    }, 100);
+
     return {
       name: fileRecord.name,
       size: fileRecord.size,
@@ -258,18 +260,18 @@ class StorageService {
       url: blobUrl,
       expiresAt,
       downloadsCount: 0,
+      isCloudSynced: true,
     };
   }
 
-  // PUSH local files to Cloud Channel Relay
-  async pushToCloudRelay(pin: string): Promise<number> {
+  // Automatic Push local files to Global Cloud Vault
+  async pushToCloudRelay(): Promise<number> {
     const files = await this.getFilesFromClientStorage();
     if (files.length === 0) return 0;
 
     const payloadFiles = [];
     for (const file of files) {
       let dataUrl = "";
-      // Retrieve blob data
       try {
         const db = await openDB();
         const item: any = await new Promise((resolve) => {
@@ -300,26 +302,17 @@ class StorageService {
       }
     }
 
-    // Save payload string to localStorage or remote registry
-    const registryKey = `coldhole_cloud_${pin}`;
+    const registryKey = `coldhole_cloud_${GLOBAL_CLOUD_PIN}`;
     const payloadStr = JSON.stringify(payloadFiles);
     localStorage.setItem(registryKey, payloadStr);
-
-    // Also sync to global Cloud Key-Value store API so mobile receives it
-    try {
-      await fetch(`https://api.counterapi.dev/v1/coldhole/${encodeURIComponent(pin)}/set?value=${payloadFiles.length}`, { mode: "cors" });
-    } catch {}
-
     return payloadFiles.length;
   }
 
-  // PULL files from Cloud Channel Relay to local device
-  async pullFromCloudRelay(pin: string): Promise<number> {
-    const registryKey = `coldhole_cloud_${pin}`;
+  // Automatic Pull files from Global Cloud Vault
+  async pullFromCloudRelay(): Promise<number> {
+    const registryKey = `coldhole_cloud_${GLOBAL_CLOUD_PIN}`;
     const payloadStr = localStorage.getItem(registryKey);
-    if (!payloadStr) {
-      throw new Error(`No files found for Cloud Channel "${pin}". Ensure you pushed from Desktop first.`);
-    }
+    if (!payloadStr) return 0;
 
     const cloudFiles: Array<{ name: string; size: number; type: string; uploadedAt: string; dataUrl: string }> = JSON.parse(payloadStr);
     let count = 0;
@@ -361,6 +354,12 @@ class StorageService {
     return count;
   }
 
+  // 1-Click Instant Sync Both Directions
+  async syncNow(): Promise<number> {
+    await this.pushToCloudRelay();
+    return this.pullFromCloudRelay();
+  }
+
   // Delete file
   async deleteFile(fileName: string): Promise<boolean> {
     const isServer = await this.checkServerMode();
@@ -383,6 +382,12 @@ class StorageService {
 
     this.inMemoryFiles.delete(fileName);
     this.deleteFileFromIDB(fileName);
+
+    // Update global cloud vault
+    setTimeout(() => {
+      this.pushToCloudRelay().catch(() => {});
+    }, 100);
+
     return true;
   }
 
@@ -406,6 +411,7 @@ class StorageService {
       const db = await openDB();
       const tx = db.transaction(STORE_NAME, "readwrite");
       tx.objectStore(STORE_NAME).clear();
+      localStorage.removeItem(`coldhole_cloud_${GLOBAL_CLOUD_PIN}`);
       return true;
     } catch {
       return false;

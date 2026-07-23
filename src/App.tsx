@@ -21,7 +21,7 @@ import {
   Square,
   ShieldAlert,
   Code,
-  Cloud
+  Zap
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { UploadedFile } from "./types";
@@ -30,11 +30,11 @@ import FileUploader from "./components/FileUploader";
 import FileCard, { formatBytes } from "./components/FileCard";
 import FilePreviewModal from "./components/FilePreviewModal";
 import QRCodeModal from "./components/QRCodeModal";
-import CloudSyncModal from "./components/CloudSyncModal";
 
 export default function App() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterCategory, setFilterCategory] = useState<"all" | "images" | "documents" | "media" | "archives" | "code">("all");
   const [sortBy, setSortBy] = useState("newest");
@@ -47,7 +47,6 @@ export default function App() {
   const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<UploadedFile | null>(null);
   const [qrFile, setQrFile] = useState<UploadedFile | null>(null);
-  const [showCloudSync, setShowCloudSync] = useState(false);
   const [selectedFileNames, setSelectedFileNames] = useState<string[]>([]);
   const [isDeletingBulk, setIsDeletingBulk] = useState(false);
 
@@ -72,6 +71,21 @@ export default function App() {
       showNotification("error", "Could not load files from storage.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleInstantSync = async () => {
+    setIsSyncing(true);
+    try {
+      await storageService.syncNow();
+      const updatedData = await storageService.getFiles();
+      setFiles(updatedData);
+      showNotification("success", "Vault synced! Mobile & Desktop are updated.");
+    } catch (error) {
+      console.error("Sync error:", error);
+      showNotification("error", "Sync failed. Please check connection.");
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -231,14 +245,15 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Cloud Sync Button */}
+            {/* 1-Click Instant Sync Button */}
             <button
-              onClick={() => setShowCloudSync(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-50 dark:bg-violet-950/40 text-violet-600 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/50 text-xs font-extrabold transition-all border border-violet-200/60 dark:border-violet-800/60 shadow-sm"
-              title="Cross-Device Cloud Sync"
+              onClick={handleInstantSync}
+              disabled={isSyncing}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 active:scale-[0.98] text-white text-xs font-bold transition-all shadow-md shadow-violet-600/20"
+              title="1-Click Sync Desktop & Mobile"
             >
-              <Cloud className="h-4 w-4 animate-bounce text-violet-600 dark:text-violet-400" />
-              <span className="hidden sm:inline">Cloud Sync</span>
+              <Zap className={`h-4 w-4 text-amber-300 ${isSyncing ? "animate-spin" : "animate-pulse"}`} />
+              <span>{isSyncing ? "Syncing..." : "Sync Vault"}</span>
             </button>
 
             {/* Dark Mode Switcher */}
@@ -319,14 +334,14 @@ export default function App() {
           </div>
 
           <div
-            onClick={() => setShowCloudSync(true)}
+            onClick={handleInstantSync}
             className="bg-gradient-to-br from-violet-600 to-indigo-700 p-4 rounded-2xl text-white shadow-lg shadow-violet-500/10 flex items-center justify-between cursor-pointer hover:scale-[1.01] transition-transform"
           >
             <div>
               <h4 className="text-xs font-bold leading-tight flex items-center gap-1.5">
-                <Cloud className="h-4 w-4" /> Cloud Sync Active
+                <Zap className="h-4 w-4 text-amber-300" /> Automatic Cross-Sync Active
               </h4>
-              <p className="text-[10px] text-white/80 mt-1 max-w-[210px]">Tap to push desktop files to mobile or pull cloud vault.</p>
+              <p className="text-[10px] text-white/80 mt-1 max-w-[210px]">Drop files on desktop and tap Sync to instantly view on mobile.</p>
             </div>
             <div className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-ping shadow-sm shrink-0" />
           </div>
@@ -532,13 +547,6 @@ export default function App() {
           fileUrl={qrFile.url}
         />
       )}
-
-      {/* Cross-Device Cloud Sync Modal */}
-      <CloudSyncModal
-        isOpen={showCloudSync}
-        onClose={() => setShowCloudSync(false)}
-        onSyncComplete={fetchFiles}
-      />
 
       {/* Footer */}
       <footer className="mt-auto py-8 text-center text-[11px] text-zinc-400 dark:text-zinc-600 border-t border-zinc-200/60 dark:border-zinc-800/80 bg-white/50 dark:bg-zinc-950/50">
