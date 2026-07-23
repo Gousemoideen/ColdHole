@@ -1,0 +1,6 @@
+{
+  "name": "Quick File Dump",
+  "description": "An elegant, mobile-responsive repository for quickly uploading, listing, downloading, and sharing files anywhere.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
