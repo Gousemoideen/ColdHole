@@ -52,6 +52,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
 
     let successCount = 0;
     let failCount = 0;
+    let lastError = "";
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -60,6 +61,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
       // 50MB per file size limit check
       if (file.size > 50 * 1024 * 1024) {
         failCount++;
+        lastError = `File "${file.name}" exceeds maximum size limit of 50 MB.`;
         continue;
       }
 
@@ -69,6 +71,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
       } catch (err: any) {
         console.error("Upload error:", err);
         failCount++;
+        lastError = err?.message || "Failed to process upload.";
       }
     }
 
@@ -85,7 +88,7 @@ export default function FileUploader({ onUploadSuccess }: FileUploaderProps) {
     } else {
       setUploadStatus({
         type: "error",
-        message: "Failed to upload files. Check file size limits.",
+        message: lastError || "Failed to upload file. Please check storage permissions or file size limits.",
       });
     }
 

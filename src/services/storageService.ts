@@ -47,7 +47,7 @@ class StorageService {
   private isServerAvailable: boolean | null = null;
   private activeBlobUrls: Map<string, string> = new Map();
 
-  // Test if Node Express Server backend is reachable
+  // Test if Node Express Server backend is reachable and actually returning JSON
   async checkServerMode(): Promise<boolean> {
     if (this.isServerAvailable !== null) return this.isServerAvailable;
     try {
@@ -55,7 +55,10 @@ class StorageService {
       const timeoutId = setTimeout(() => controller.abort(), 2000);
       const response = await fetch("/api/files", { signal: controller.signal });
       clearTimeout(timeoutId);
-      this.isServerAvailable = response.ok;
+
+      const contentType = response.headers.get("content-type") || "";
+      // Must be ok AND return JSON (to avoid Netlify SPA 200 index.html fallback)
+      this.isServerAvailable = response.ok && contentType.includes("application/json");
     } catch {
       this.isServerAvailable = false;
     }
@@ -69,7 +72,7 @@ class StorageService {
     if (isServer) {
       try {
         const res = await fetch("/api/files");
-        if (res.ok) {
+        if (res.ok && res.headers.get("content-type")?.includes("application/json")) {
           const files: UploadedFile[] = await res.json();
           return files;
         }
@@ -78,7 +81,7 @@ class StorageService {
       }
     }
 
-    // Client-side IndexedDB mode
+    // Client-side IndexedDB mode fallback
     return this.getFilesFromIDB();
   }
 
@@ -139,31 +142,32 @@ class StorageService {
     const isServer = await this.checkServerMode();
 
     if (isServer) {
-      const formData = new FormData();
-      formData.append("file", file);
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
 
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Server upload failed");
+        if (res.ok && res.headers.get("content-type")?.includes("application/json")) {
+          const data = await res.json();
+          return {
+            name: data.file.name,
+            size: data.file.size,
+            type: file.type || "application/octet-stream",
+            uploadedAt: new Date().toISOString(),
+            url: data.file.url,
+            expiresAt: getExpirationTimestamp(expiration),
+          };
+        }
+      } catch (e) {
+        console.warn("Server upload failed, falling back to IndexedDB storage:", e);
       }
-
-      const data = await res.json();
-      return {
-        name: data.file.name,
-        size: data.file.size,
-        type: file.type || "application/octet-stream",
-        uploadedAt: new Date().toISOString(),
-        url: data.file.url,
-        expiresAt: getExpirationTimestamp(expiration),
-      };
     }
 
-    // Client-side IndexedDB store
+    // Client-side IndexedDB store (Netlify / static deploy fallback)
     const db = await openDB();
     const expiresAt = getExpirationTimestamp(expiration);
 
