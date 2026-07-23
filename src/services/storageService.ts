@@ -4,24 +4,28 @@ const DB_NAME = "ColdHoleDB";
 const STORE_NAME = "files";
 const DB_VERSION = 1;
 
-// Open IndexedDB connection
+// Open IndexedDB connection with error handling
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    if (!window.indexedDB) {
-      reject(new Error("IndexedDB is not supported in this browser environment."));
+    if (typeof window === "undefined" || !window.indexedDB) {
+      reject(new Error("IndexedDB is not supported in this environment."));
       return;
     }
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    try {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: "name" });
-      }
-    };
+      request.onupgradeneeded = (event) => {
+        const db = (event.target as IDBOpenDBRequest).result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: "name" });
+        }
+      };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("Failed to open IndexedDB"));
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
@@ -46,8 +50,9 @@ export function getExpirationTimestamp(option: ExpirationOption): string | null 
 class StorageService {
   private isServerAvailable: boolean | null = null;
   private activeBlobUrls: Map<string, string> = new Map();
+  private inMemoryFiles: Map<string, UploadedFile & { blobData: Blob }> = new Map();
 
-  // Test if Node Express Server backend is reachable and actually returning JSON
+  // Test if Node Express Server backend is reachable and returning JSON
   async checkServerMode(): Promise<boolean> {
     if (this.isServerAvailable !== null) return this.isServerAvailable;
     try {
@@ -65,7 +70,7 @@ class StorageService {
     return this.isServerAvailable;
   }
 
-  // Fetch all files (from server or IndexedDB)
+  // Fetch all files (from server, IndexedDB, or in-memory fallback)
   async getFiles(): Promise<UploadedFile[]> {
     const isServer = await this.checkServerMode();
 
@@ -77,67 +82,81 @@ class StorageService {
           return files;
         }
       } catch (err) {
-        console.warn("Failed fetching from backend server, falling back to IndexedDB:", err);
+        console.warn("Failed fetching from server, falling back to client storage:", err);
       }
     }
 
-    // Client-side IndexedDB mode fallback
-    return this.getFilesFromIDB();
+    return this.getFilesFromClientStorage();
   }
 
-  private async getFilesFromIDB(): Promise<UploadedFile[]> {
+  private async getFilesFromClientStorage(): Promise<UploadedFile[]> {
+    const validFiles: UploadedFile[] = [];
+    const now = new Date().getTime();
+
+    // 1. Load from IndexedDB if available
     try {
       const db = await openDB();
-      return new Promise((resolve, reject) => {
+      const idbItems: (UploadedFile & { blobData?: Blob })[] = await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
         const store = tx.objectStore(STORE_NAME);
         const request = store.getAll();
-
-        request.onsuccess = () => {
-          const now = new Date().getTime();
-          const allItems: (UploadedFile & { blobData?: Blob })[] = request.result || [];
-          const validFiles: UploadedFile[] = [];
-
-          for (const item of allItems) {
-            // Filter expired files
-            if (item.expiresAt && new Date(item.expiresAt).getTime() < now) {
-              this.deleteFileFromIDB(item.name);
-              continue;
-            }
-
-            // Create ObjectURL for local blob if needed
-            let fileUrl = item.url;
-            if (item.blobData) {
-              if (!this.activeBlobUrls.has(item.name)) {
-                fileUrl = URL.createObjectURL(item.blobData);
-                this.activeBlobUrls.set(item.name, fileUrl);
-              } else {
-                fileUrl = this.activeBlobUrls.get(item.name)!;
-              }
-            }
-
-            validFiles.push({
-              name: item.name,
-              size: item.size,
-              type: item.type,
-              uploadedAt: item.uploadedAt,
-              url: fileUrl,
-              expiresAt: item.expiresAt || null,
-              downloadsCount: item.downloadsCount || 0,
-            });
-          }
-
-          resolve(validFiles);
-        };
+        request.onsuccess = () => resolve(request.result || []);
         request.onerror = () => reject(request.error);
       });
+
+      for (const item of idbItems) {
+        if (item.expiresAt && new Date(item.expiresAt).getTime() < now) {
+          this.deleteFileFromIDB(item.name);
+          continue;
+        }
+
+        let fileUrl = item.url;
+        if (item.blobData) {
+          if (!this.activeBlobUrls.has(item.name)) {
+            fileUrl = URL.createObjectURL(item.blobData);
+            this.activeBlobUrls.set(item.name, fileUrl);
+          } else {
+            fileUrl = this.activeBlobUrls.get(item.name)!;
+          }
+        }
+
+        validFiles.push({
+          name: item.name,
+          size: item.size,
+          type: item.type,
+          uploadedAt: item.uploadedAt,
+          url: fileUrl,
+          expiresAt: item.expiresAt || null,
+          downloadsCount: item.downloadsCount || 0,
+        });
+      }
     } catch (e) {
-      console.error("IndexedDB error:", e);
-      return [];
+      console.warn("IndexedDB read skipped or unavailable, using memory store:", e);
     }
+
+    // 2. Load from in-memory fallback store
+    for (const [name, memFile] of this.inMemoryFiles.entries()) {
+      if (memFile.expiresAt && new Date(memFile.expiresAt).getTime() < now) {
+        this.inMemoryFiles.delete(name);
+        continue;
+      }
+      if (!validFiles.some((f) => f.name === name)) {
+        validFiles.push({
+          name: memFile.name,
+          size: memFile.size,
+          type: memFile.type,
+          uploadedAt: memFile.uploadedAt,
+          url: memFile.url,
+          expiresAt: memFile.expiresAt || null,
+          downloadsCount: memFile.downloadsCount || 0,
+        });
+      }
+    }
+
+    return validFiles;
   }
 
-  // Upload single file
+  // Upload single file with multi-level fallback guarantee
   async uploadFile(file: File, expiration: ExpirationOption = "never"): Promise<UploadedFile> {
     const isServer = await this.checkServerMode();
 
@@ -163,17 +182,15 @@ class StorageService {
           };
         }
       } catch (e) {
-        console.warn("Server upload failed, falling back to IndexedDB storage:", e);
+        console.warn("Server upload failed, switching to client storage:", e);
       }
     }
 
-    // Client-side IndexedDB store (Netlify / static deploy fallback)
-    const db = await openDB();
+    // Client-side storage handling
     const expiresAt = getExpirationTimestamp(expiration);
-
-    // Prevent duplicate name collision
     let fileName = file.name;
-    const existing = await this.getFilesFromIDB();
+    const existing = await this.getFilesFromClientStorage();
+
     if (existing.some((f) => f.name === fileName)) {
       const extIndex = fileName.lastIndexOf(".");
       if (extIndex !== -1) {
@@ -185,7 +202,10 @@ class StorageService {
       }
     }
 
-    const blobUrl = URL.createObjectURL(file);
+    // Convert file to clean, serializable Blob
+    const fileBuffer = await file.arrayBuffer();
+    const cleanBlob = new Blob([fileBuffer], { type: file.type || "application/octet-stream" });
+    const blobUrl = URL.createObjectURL(cleanBlob);
     this.activeBlobUrls.set(fileName, blobUrl);
 
     const fileRecord = {
@@ -196,27 +216,33 @@ class StorageService {
       url: blobUrl,
       expiresAt,
       downloadsCount: 0,
-      blobData: file,
+      blobData: cleanBlob,
     };
 
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.put(fileRecord);
+    // Attempt IndexedDB storage
+    try {
+      const db = await openDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.put(fileRecord);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    } catch (err) {
+      console.warn("IndexedDB write failed/blocked, storing in memory vault:", err);
+      this.inMemoryFiles.set(fileName, fileRecord);
+    }
 
-      request.onsuccess = () => {
-        resolve({
-          name: fileRecord.name,
-          size: fileRecord.size,
-          type: fileRecord.type,
-          uploadedAt: fileRecord.uploadedAt,
-          url: blobUrl,
-          expiresAt,
-          downloadsCount: 0,
-        });
-      };
-      request.onerror = () => reject(request.error);
-    });
+    return {
+      name: fileRecord.name,
+      size: fileRecord.size,
+      type: fileRecord.type,
+      uploadedAt: fileRecord.uploadedAt,
+      url: blobUrl,
+      expiresAt,
+      downloadsCount: 0,
+    };
   }
 
   // Delete file
@@ -234,23 +260,22 @@ class StorageService {
       }
     }
 
-    return this.deleteFileFromIDB(fileName);
+    if (this.activeBlobUrls.has(fileName)) {
+      URL.revokeObjectURL(this.activeBlobUrls.get(fileName)!);
+      this.activeBlobUrls.delete(fileName);
+    }
+
+    this.inMemoryFiles.delete(fileName);
+    this.deleteFileFromIDB(fileName);
+    return true;
   }
 
   private async deleteFileFromIDB(fileName: string): Promise<boolean> {
     try {
-      if (this.activeBlobUrls.has(fileName)) {
-        URL.revokeObjectURL(this.activeBlobUrls.get(fileName)!);
-        this.activeBlobUrls.delete(fileName);
-      }
       const db = await openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        const store = tx.objectStore(STORE_NAME);
-        const request = store.delete(fileName);
-        request.onsuccess = () => resolve(true);
-        request.onerror = () => reject(request.error);
-      });
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(fileName);
+      return true;
     } catch {
       return false;
     }
@@ -259,11 +284,12 @@ class StorageService {
   // Clear all storage
   async clearAll(): Promise<boolean> {
     try {
+      this.inMemoryFiles.clear();
+      this.activeBlobUrls.forEach((url) => URL.revokeObjectURL(url));
+      this.activeBlobUrls.clear();
       const db = await openDB();
       const tx = db.transaction(STORE_NAME, "readwrite");
       tx.objectStore(STORE_NAME).clear();
-      this.activeBlobUrls.forEach((url) => URL.revokeObjectURL(url));
-      this.activeBlobUrls.clear();
       return true;
     } catch {
       return false;
